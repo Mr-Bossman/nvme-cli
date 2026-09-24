@@ -8058,6 +8058,30 @@ static int resv_release(int argc, char **argv, struct command *cmd, struct plugi
 	return err;
 }
 
+/* The Number of Registrants field is 16 bits wide. */
+#define RESV_MAX_REGCTL		0xffff
+
+/*
+ * Bytes needed to hold a reservation status with @regctl registrant
+ * descriptors. Pass 0 for the fixed header alone, which is all it takes
+ * to learn how many registrants are there.
+ *
+ * The extended data structure changes both halves of the layout:
+ * a 64-byte header rather than 24, and 64-byte descriptors rather than 24.
+ * All four are multiples of 4, so the result is always a whole number of
+ * dwords, which nvme_resv_report() relies on when it turns the byte
+ * count into the 0's-based dword count the command carries.
+ */
+static int resv_report_size(bool eds, unsigned int regctl)
+{
+	if (eds)
+		return offsetof(struct nvme_resv_status, regctl_eds) +
+			regctl * sizeof(struct nvme_registered_ctrl_ext);
+
+	return offsetof(struct nvme_resv_status, regctl_ds) +
+		regctl * sizeof(struct nvme_registered_ctrl);
+}
+
 static int resv_report(int argc, char **argv, struct command *cmd, struct plugin *plugin)
 {
 	const char *desc = "Returns Reservation Status data\n"
@@ -8071,7 +8095,7 @@ static int resv_report(int argc, char **argv, struct command *cmd, struct plugin
 	_cleanup_free_ struct nvme_id_ctrl *ctrl = NULL;
 	_cleanup_nvme_dev_ struct nvme_dev *dev = NULL;
 	nvme_print_flags_t flags;
-	int err, size;
+	int err, size, regctl;
 
 	struct config {
 		__u32	namespace_id;
@@ -8114,13 +8138,6 @@ static int resv_report(int argc, char **argv, struct command *cmd, struct plugin
 		}
 	}
 
-	if (!cfg.numd || cfg.numd >= (0x1000 >> 2))
-		cfg.numd = (0x1000 >> 2) - 1;
-	if (cfg.numd < 3)
-		cfg.numd = 3;
-
-	size = (cfg.numd + 1) << 2;
-
 	ctrl = nvme_alloc(sizeof(*ctrl));
 	if (!ctrl)
 		return -ENOMEM;
@@ -8133,6 +8150,24 @@ static int resv_report(int argc, char **argv, struct command *cmd, struct plugin
 
 	if (ctrl->ctratt & NVME_CTRL_CTRATT_128_ID)
 		cfg.eds = true;
+
+	/*
+	 * The registrant count is only known once the report header has
+	 * been read, so fetch the header first and repeat the command with
+	 * a buffer sized for the count it reports. Sizing the transfer up
+	 * front instead would truncate the report on a namespace with many
+	 * registered controllers: one page holds only 63 registrants when
+	 * the extended data structure is in use. An explicit --numd is
+	 * honoured as given and skips the second pass.
+	 */
+	if (cfg.numd) {
+		size = resv_report_size(cfg.eds, RESV_MAX_REGCTL);
+		if (cfg.numd < 3)
+			cfg.numd = 3;
+		if (cfg.numd < (__u32)size / 4 - 1)
+			size = (cfg.numd + 1) << 2;
+	} else
+		size = resv_report_size(cfg.eds, 0);
 
 	status = nvme_alloc(size);
 	if (!status)
@@ -8149,12 +8184,54 @@ static int resv_report(int argc, char **argv, struct command *cmd, struct plugin
 		.result		= NULL,
 	};
 	err = nvme_resv_report(&args);
-	if (!err)
-		nvme_show_resv_report(status, size, cfg.eds, flags);
-	else if (err > 0)
+	if (err > 0) {
 		nvme_show_status(err);
-	else
+		return err;
+	} else if (err) {
 		nvme_show_error("reservation report: %s", nvme_strerror(errno));
+		return err;
+	}
+
+	/* Two separate bytes, not a __le16: the field sits at odd offset 5. */
+	regctl = status->regctl[0] | (status->regctl[1] << 8);
+
+	if (!cfg.numd && regctl) {
+		struct nvme_resv_status *p;
+
+		size = resv_report_size(cfg.eds, regctl);
+
+		/*
+		 * On failure, libnvme_realloc() returns NULL and leaves the
+		 * original allocation valid, so assigning straight to status
+		 * would drop the only reference to it.
+		 */
+		p = nvme_alloc(size);
+		if (!p)
+			return -ENOMEM;
+		status = p;
+
+		/* Re-init, not just repoint: cdw10 encodes the new length. */
+		struct nvme_resv_report_args args = {
+			.args_size	= sizeof(args),
+			.fd		= dev_fd(dev),
+			.nsid		= cfg.namespace_id,
+			.eds		= cfg.eds,
+			.len		= size,
+			.report		= status,
+			.timeout	= nvme_cfg.timeout,
+			.result		= NULL,
+		};
+		err = nvme_resv_report(&args);
+		if (err > 0) {
+			nvme_show_status(err);
+			return err;
+		} else if (err) {
+			nvme_show_error("reservation report: %s", nvme_strerror(errno));
+			return err;
+		}
+	}
+
+	nvme_show_resv_report(status, size, cfg.eds, flags);
 
 	return err;
 }
