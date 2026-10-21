@@ -86,6 +86,28 @@ struct nvme_config {
 };
 
 /*
+ * Discovery controller persistence mode. Internal only -- both the
+ * getter and setter are hand-written and speak strings ("no", "auto",
+ * "force") at the public boundary, so this enum never appears in a
+ * public header.
+ *
+ * UNSET means not explicitly configured; behaves the same as NO when
+ * applied to a live connection.
+ *
+ * AUTO persists a DC connection only when that DC's DLP entry's own EPCSD
+ * reports support for it, degrading to non-persistent otherwise.
+ *
+ * FORCE persists regardless of what EPCSD reports, for a target whose
+ * self-reported EPCSD cannot be trusted.
+ */
+enum nvme_persistent {
+	NVME_PERSISTENT_UNSET        = 0,
+	NVME_PERSISTENT_NO           = 1,
+	NVME_PERSISTENT_AUTO         = 2,
+	NVME_PERSISTENT_FORCE        = 3,
+};
+
+/*
  * the ordering of the arguments matters, as the argument parser uses the first match, thus any
  * command which defines -t shorthand will match first.
  */

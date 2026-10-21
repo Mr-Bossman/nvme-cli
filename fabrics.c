@@ -59,7 +59,7 @@
 
 /* Name of file to output log pages in their raw format */
 static char *raw;
-static bool persistent;
+static enum nvme_persistent persistent;
 static bool quiet;
 static bool dump_config;
 
@@ -161,11 +161,20 @@ static int set_discovery_kato(struct nvme_fabrics_config *cfg)
 {
 	int tmo = cfg->keep_alive_tmo;
 
+	/*
+	 * EPCSD isn't known until after the Discovery Log Page comes back, so
+	 * auto mode optimistically requests a KATO here; dc_should_connect()
+	 * disconnects per entry afterward if EPCSD turns out to be unset.
+	 */
+	bool wants_kato = persistent == NVME_PERSISTENT_AUTO ||
+		persistent == NVME_PERSISTENT_FORCE;
+
+
 	/* Set kato to NVMF_DEF_DISC_TMO for persistent controllers */
-	if (persistent && !cfg->keep_alive_tmo)
+	if (wants_kato && !cfg->keep_alive_tmo)
 		cfg->keep_alive_tmo = NVMF_DEF_DISC_TMO;
 	/* Set kato to zero for non-persistent controllers */
-	else if (!persistent && (cfg->keep_alive_tmo > 0))
+	else if (!wants_kato && (cfg->keep_alive_tmo > 0))
 		cfg->keep_alive_tmo = 0;
 
 	return tmo;
@@ -428,6 +437,23 @@ char *nvmf_get_default_trsvcid(const char *transport, bool discovery_ctrl)
 	return NULL;
 }
 
+int nvme_set_persistent_from_str(const char *str)
+{
+	if (!str)
+		return -EINVAL;
+
+	if (!strcasecmp(str, "no"))
+		persistent = LIBNVMF_PERSISTENT_NO;
+	else if (!strcasecmp(str, "auto"))
+		persistent = LIBNVMF_PERSISTENT_AUTO;
+	else if (!strcasecmp(str, "force"))
+		persistent = LIBNVMF_PERSISTENT_FORCE;
+	else
+		return -EINVAL;
+
+	return 0;
+}
+
 static int discover_from_conf_file(nvme_root_t r, nvme_host_t h,
 				   const char *desc, bool connect,
 				   const struct nvme_fabrics_config *defcfg)
@@ -443,18 +469,20 @@ static int discover_from_conf_file(nvme_root_t r, nvme_host_t h,
 	nvme_print_flags_t flags;
 	char *format = "normal";
 	struct nvme_fabrics_config cfg;
+	char* persistent_arg = NULL;
 	bool force = false;
 
 	NVMF_ARGS(opts, cfg,
 		  OPT_FMT("output-format", 'o', &format,     output_format),
 		  OPT_FILE("raw",          'r', &raw,        "save raw output to file"),
-		  OPT_FLAG("persistent",   'p', &persistent, "persistent discovery connection"),
+		  OPT_STRING_OPTIONAL("persistent",   0, &persistent_arg, "persistent discovery connection"),
 		  OPT_FLAG("quiet",          0, &quiet,      "suppress already connected errors"),
 		  OPT_INCR("verbose",      'v', &verbose,    "Increase logging verbosity"),
 		  OPT_FLAG("force",          0, &force,      "Force persistent discovery controller creation"));
 
 	nvmf_default_config(&cfg);
 
+	nvme_set_persistent_from_str(persistent_arg);
 	ret = validate_output_format(format, &flags);
 	if (ret < 0) {
 		nvme_show_error("Invalid output format");
@@ -1125,7 +1153,7 @@ do_connect:
 	 * this as a persistent connection and specify a KATO.
 	 */
 	if (!strcmp(subsysnqn, NVME_DISC_SUBSYS_NAME)) {
-		persistent = true;
+		persistent = NVME_PERSISTENT_FORCE;
 
 		set_discovery_kato(&cfg);
 	}
