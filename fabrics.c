@@ -482,7 +482,6 @@ static int discover_from_conf_file(nvme_root_t r, nvme_host_t h,
 
 	nvmf_default_config(&cfg);
 
-	nvme_set_persistent_from_str(persistent_arg);
 	ret = validate_output_format(format, &flags);
 	if (ret < 0) {
 		nvme_show_error("Invalid output format");
@@ -521,6 +520,7 @@ static int discover_from_conf_file(nvme_root_t r, nvme_host_t h,
 		if (!transport && !traddr)
 			goto next;
 
+		nvme_set_persistent_from_str(persistent_arg);
 		if (!trsvcid)
 			trsvcid = nvmf_get_default_trsvcid(transport, true);
 
@@ -753,6 +753,7 @@ int nvmf_discover(const char *desc, int argc, char **argv, bool connect)
 	char *format = "normal";
 	struct nvme_fabrics_config cfg;
 	char *device = NULL;
+	char* persistent_arg = NULL;
 	bool force = false;
 	bool json_config = false;
 	bool nbft = false, nonbft = false;
@@ -762,7 +763,7 @@ int nvmf_discover(const char *desc, int argc, char **argv, bool connect)
 		  OPT_STRING("device",     'd', "DEV", &device,       "use existing discovery controller device"),
 		  OPT_FMT("output-format", 'o', &format,              output_format),
 		  OPT_FILE("raw",          'r', &raw,                 "save raw output to file"),
-		  OPT_FLAG("persistent",   'p', &persistent,          "persistent discovery connection"),
+		  OPT_STRING_OPTIONAL("persistent",   0, &persistent_arg, "persistent discovery connection"),
 		  OPT_FLAG("quiet",          0, &quiet,               "suppress already connected errors"),
 		  OPT_STRING("config",     'J', "FILE", &config_file, nvmf_config_file),
 		  OPT_INCR("verbose",      'v', &verbose,             "Increase logging verbosity"),
@@ -778,6 +779,8 @@ int nvmf_discover(const char *desc, int argc, char **argv, bool connect)
 	ret = argconfig_parse(argc, argv, desc, opts);
 	if (ret)
 		return ret;
+
+	nvme_set_persistent_from_str(persistent_arg);
 
 	ret = validate_output_format(format, &flags);
 	if (ret < 0) {
